@@ -10,11 +10,10 @@ def defAlpha(image, alphaLevel, backgroundLevel):
     for i,pixel in enumerate(pixeldata):
         if pixel[:3] == (255,255,255):
             pixeldata[i] = (255,255,255,backgroundLevel)
-            
+
         else:
             pixeldata[i] = (pixel[0], pixel[1], pixel[2], alphaLevel)
-            
+
     image.putdata(pixeldata)
     del pixeldata
     return(image)
-
