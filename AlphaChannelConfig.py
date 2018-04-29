@@ -4,13 +4,13 @@
 import sys
 from PIL import Image
 
+#Convert RGB image to RGBA image
 def defAlpha(image, alphaLevel, backgroundLevel):
     image = image.convert('RGBA')
     pixeldata = list(image.getdata())
     for i,pixel in enumerate(pixeldata):
-        if pixel[:3] == (255,255,255):
+        if pixel[:3] == (255,255,255): #Make background mask transparent
             pixeldata[i] = (255,255,255,backgroundLevel)
-
         else:
             pixeldata[i] = (pixel[0], pixel[1], pixel[2], alphaLevel)
 

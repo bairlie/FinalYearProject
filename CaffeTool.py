@@ -38,7 +38,7 @@
 ##
 #############################################################################
 
-import sys, os, io, caffe
+import sys, os, io, time, caffe, copy
 import numpy as np
 from PyQt4 import QtGui, QtCore
 from PyQt4.QtCore import *
@@ -48,7 +48,8 @@ import cStringIO
 from PIL import Image
 from SegmentImage import segmentImage
 from AlphaChannelConfig import defAlpha
-#from CheckBox import ExampleCombobox
+from JSONExport import buildLabelJSON
+from ComboBox import ExampleCombobox
 from GMMSegmentation import segViaGMM
 
 #qim = ImageQt(r'E:\Final Year Project\Python\2007_000392.jpg')
@@ -64,7 +65,7 @@ background = ImageQt(background)
 labels = [[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19],[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]]
 brushColours = [QColor(255,255,255,255), QColor(128, 0, 0,255), QColor(0, 128,   0,255), QColor(128, 128,   0,255), QColor(  0,   0, 128,255), QColor(128,   0, 128,255), QColor(  0, 128, 128,255)
 , QColor(128, 128, 128,255), QColor( 64,   0,   0,255), QColor(192,   0,   0,255), QColor( 64, 128,   0,255), QColor(192, 128,   0,255), QColor( 64, 0, 128,255), QColor(192,   0, 128,255)
-, QColor(64, 128, 128,255), QColor(192, 128, 128,255), QColor(0,  64,   0,255), QColor(128,  64,   0,255), QColor(0, 192,   0,255), QColor(128, 192, 0,255), QColor(128, 192, 0,255), QColor(0,  64, 128,255)]
+, QColor(64, 128, 128,255), QColor(192, 0, 0,255), QColor(0,  64,   0,255), QColor(128,  64,   0,255), QColor(0, 192,   0,255), QColor(128, 192, 0,255), QColor(128, 192, 0,255), QColor(0,  64, 128,255)]
 labels[0][0] = "Background"
 labels[1][0] = brushColours[0]
 for i in range(1,20):
@@ -91,15 +92,18 @@ class Window(QtGui.QMainWindow):
         fileMenu = mainMenu.addMenu('&File')
         optionMenu = mainMenu.addMenu("&Options")
         optionMenu.addAction(self.penWidthAct)
-        #optionMenu.addAction(self.segModelAct)
+        optionMenu.addAction(self.undoAct)
+        optionMenu.addAction(self.segModelAct)
         optionMenu.addAction(self.toggleGMMAct)
         fileMenu.addAction(self.openAct)
         fileMenu.addAction(self.saveFile)
+        fileMenu.addAction(self.saveJSONAct)
         fileMenu.addAction(self.segImage)
 
         #Initialise buffer for converting Pixmaps to PIL images
         self.buffer = QBuffer()
         self.buffer.open(QIODevice.ReadWrite)
+        self.strio = cStringIO.StringIO()
 
         #Add Dropdown Menu for Object Classes
         self.comboBox = QtGui.QComboBox(self)
@@ -109,11 +113,12 @@ class Window(QtGui.QMainWindow):
             self.comboBox.addItem(labels[0][i])
             self.comboBox.setItemData(i, QBrush(labels[1][i]), Qt.TextColorRole)
         self.comboBox.move(0, 25)
+        self.comboBox.resize(100, 25)
         self.comboBox.currentIndexChanged.connect(self.changeClass)
 
         #Add Textbox for class labelling
         self.textbox = QLineEdit(self)
-        self.textbox.move(120, 25)
+        self.textbox.move(130, 25)
         self.textbox.resize(200,30)
 
         #Add label button
@@ -123,8 +128,8 @@ class Window(QtGui.QMainWindow):
         classBtn.move(340,25)
 
         #Set-up segmentation variables
-        self.segModelProto = 'deploy.prototxt'
-        self.segModelCaffe = 'fcn2s-dilated-vgg19.caffemodel'
+        self.segModelProto = 'Models/fcn2s-dilated-vgg19/deploy-vgg19.prototxt'
+        self.segModelCaffe = 'Models/fcn2s-dilated-vgg19/fcn2s-dilated-vgg19.caffemodel'
 
         #Set-up variables for drawing
         self.setAttribute(QtCore.Qt.WA_StaticContents)
@@ -134,10 +139,25 @@ class Window(QtGui.QMainWindow):
         self.myPenColor = brushColours[0]
         self.lastPoint = QtCore.QPoint()
 
+        #Set-Up Undo variables
+        self.maskStack = []
+        self.origStack = []
+
+        QImage(background).save("LastSeg.png")
+        QImage(background).save("LastSegO.png")
+        self.maskStackStart = QImage(background)
+        self.origStackStart = QImage(background)
+
+        self.maskStack.append(self.maskStackStart)
+        self.origStack.append(self.origStackStart)
+
         #Set-Up GMM Tool Variables
         self.rubberBand = QRubberBand(QRubberBand.Rectangle, self)
         self.origin = QPoint()
-        self.gmmActive = False #Testing Variable - for now
+        self.gmmActive = False
+
+        #Time Variable for testing
+        self.startTime = None
 
         #Set-Up Image Pixmaps and Painter
         self.pic = QtGui.QLabel(self)
@@ -146,17 +166,30 @@ class Window(QtGui.QMainWindow):
         self.segment.setGeometry(0, 55, 600, 500)
         self.segs = QtGui.QPixmap.fromImage(background)
         self.segment.setPixmap(QtGui.QPixmap(self.segs))
-        #self.painter = QtGui.QPainter(self.segs)
+        self.origSeg = QtGui.QPixmap.fromImage(background)
+        self.lastSeg = QtGui.QPixmap.fromImage(background)
+        self.outMask = QtGui.QLabel(self)
+        self.outMask.setGeometry(0, 55, 600, 500)
         if(self.pix != None):
             self.pic.setPixmap(QtGui.QPixmap(self.pix))
         self.show()
 
-    #Method for changing the segmentation model - Uncomment
-    #def changeModel(self):
-    #        dialog = ExampleCombobox()
-    #        answer = dialog.exec_()
-    #        if answer[0] == int(QMessageBox.Ok):
-    #            print (str(answer[1]))
+    #Method for changing the segmentation model
+    def changeModel(self):
+            dialog = ExampleCombobox()
+            answer = dialog.exec_()
+            if answer[0] == int(QMessageBox.Ok):
+                if (str(answer[1])) == "fcn2s-dilated-vgg19":
+                    self.segModelProto = 'Models/fcn2s-dilated-vgg19/deploy-vgg19.prototxt'
+                    self.segModelCaffe = 'Models/fcn2s-dilated-vgg19/fcn2s-dilated-vgg19.caffemodel'
+
+                elif (str(answer[1])) == "voc-fcn8s":
+                    self.segModelProto = 'Models/voc-fcn8s/deploy.prototxt'
+                    self.segModelCaffe = 'Models/voc-fcn8s/fcn8s-heavy-pascal.caffemodel'
+
+                elif (str(answer[1])) == "CSAIL-FCN":
+                    self.segModelProto = 'Models/CSAIL-FCN/deploy.prototxt'
+                    self.segModelCaffe = 'Models/CSAIL-FCN/FCN_iter_160000.caffemodel'
 
     #Method for opening an image file
     def open(self):
@@ -171,19 +204,34 @@ class Window(QtGui.QMainWindow):
             self.pic.setPixmap(QtGui.QPixmap(self.pix))
             w = self.pix.width()
             h = self.pix.height()
+            self.setFixedSize(w,h+60)
             self.pic.setGeometry(0, 60, w, h)
             self.segment.setGeometry(0, 60, w, h)
+
+            #Reset Segmentation Mask
+            self.segs = QtGui.QPixmap.fromImage(background)
+            self.origSeg = QtGui.QPixmap.fromImage(background)
+            self.segs = self.segs.scaled(w,h)
+            self.origSeg = self.origSeg.scaled(w,h)
+            self.segs.save("LastSeg.png")
+            self.origSeg.save("LastSegO.png")
+            self.segment.setPixmap(QtGui.QPixmap(self.segs))
+            self.segment.update()
             self.pic.update()
 
-    #Method for saving an image file TODO: Add JSON export
+            #Record Start Time
+            self.startTime = time.time()
+
+    #Method for saving an image file
     def file_save(self):
-        #files_types = ["Text files (*.txt)", "Images (*.png *.jpg)"]
+        timeTaken = time.time() - self.startTime
         name = QtGui.QFileDialog.getSaveFileName(self, 'Save File')
-        self.segs.save(name)
-        dictionary = dict(zip(labels[0], labels[1]))
-        #img = Image.open(name)
-        #segMasks = defAlpha(img, 255, 255)
-        #segMasks.save(name)
+        self.origSeg.save(name)
+
+        #Save Segmentation Time to file
+        with open(str(self.imgName[62:-4]+".txt"), "w") as output:
+            output.write(str(timeTaken))
+
 
     #Method for turning the GMM tool on and off
     def toggleGMM(self):
@@ -199,7 +247,7 @@ class Window(QtGui.QMainWindow):
     #Initialise Actions for Menubar
     def initActions(self):
         #Open Image
-        self.openAct = QtGui.QAction("&Open...", self, shortcut="Ctrl+O",
+        self.openAct = QtGui.QAction("&Open", self, shortcut="Ctrl+O",
             triggered=self.open)
 
         #Save Image
@@ -208,20 +256,26 @@ class Window(QtGui.QMainWindow):
         self.saveFile.setStatusTip('Save File')
         self.saveFile.triggered.connect(self.file_save)
 
+        #Export annotation as JSON
+        self.saveJSONAct = QtGui.QAction("&Save JSON", self, shortcut="Ctrl+J", triggered=self.saveJSON)
+
         #Run Segmentation
         self.segImage = QtGui.QAction("&Segment", self, shortcut="Ctrl+R", triggered=self.updateImage)
 
+        #Undo Last Action
+        self.undoAct = QtGui.QAction("&Undo", self, shortcut="Ctrl+Z", triggered=self.undoAction)
+
         #Change Pen Width
-        self.penWidthAct = QtGui.QAction("Pen &Width...", self,
+        self.penWidthAct = QtGui.QAction("Pen &Width...", self, shortcut="Ctrl+W",
             triggered=self.penWidth)
 
         #Toggle Gaussian Mixture Model Tool
-        self.toggleGMMAct = QtGui.QAction("Toggle &GMM", self,
+        self.toggleGMMAct = QtGui.QAction("Toggle &GMM", self, shortcut="Ctrl+G",
             triggered=self.toggleGMM)
 
         #Change Segmentation Model
-        #self.segModelAct = QtGui.QAction("Change &Model...", self,
-        #    triggered=self.changeModel)
+        self.segModelAct = QtGui.QAction("Change &Model...", self,
+            triggered=self.changeModel)
 
     #Set Brush Colour based on the selected Class
     def changeClass(self):
@@ -243,15 +297,40 @@ class Window(QtGui.QMainWindow):
             self.comboBox.setItemData(i, QBrush(labels[1][i]), Qt.TextColorRole)
         self.comboBox.update()
 
+    #Save image annotation as JSON file
+    def saveJSON(self):
+        segLayer = QImage(self.origSeg)
+        segLayer.save(self.buffer, "PNG")
+        strio = cStringIO.StringIO()
+        strio.write(self.buffer.data())
+        self.buffer.close()
+        strio.seek(0)
+        img = Image.open(strio)
+        buildLabelJSON(labels,img,self.imgName[:-4])
+
     #Perform Image Segmentation, then overlay segments over original image
     def updateImage(self):
         if(self.imgName != None):
             overlay = segmentImage(self.segModelProto, self.segModelCaffe ,self.imgName)
+            newMasks = ImageQt(overlay)
+            self.origSeg = QtGui.QPixmap.fromImage(newMasks)
             overlay = defAlpha(overlay, 100, 1)
             overlay = ImageQt(overlay)
+            self.lastSeg = self.segs
             self.segs = QtGui.QPixmap.fromImage(overlay)
             self.segment.setPixmap(QtGui.QPixmap(self.segs))
-            #self.painter = QtGui.QPainter(self.segs)
+
+            #self.maskStackStart = QImage(self.segs)
+            self.segs.save("LastSeg.png")
+            self.origSeg.save("LastSegO.png")
+            self.origStackStart = QImage(self.origSeg)
+
+            self.maskStack = []
+            self.origStack = []
+
+            self.maskStack.append(self.maskStackStart)
+            self.origStack.append(self.origStackStart)
+
             self.segment.show()
 
     #Method for Detecting a Mouse Press
@@ -259,13 +338,11 @@ class Window(QtGui.QMainWindow):
         if event.button() == QtCore.Qt.LeftButton:
             if self.gmmActive:
                 self.origin = QPoint(event.pos())
-                #self.origin.setY(self.origin.y() - 60)
                 self.rubberBand.setGeometry(QRect(self.origin, QSize()))
                 self.rubberBand.show()
             else:
                 self.lastPoint = event.pos()
                 self.lastPoint.setY(self.lastPoint.y() - 60)
-                #self.lastPoint.setX(self.lastPoint.x() - 50)
                 self.scribbling = True
 
     #Method for Detecting Mouse Movement
@@ -295,12 +372,14 @@ class Window(QtGui.QMainWindow):
                 img = Image.open(self.imgName)
                 cropped_im = img.crop(crop_rectangle)
                 cropCol = cropped_im.load()
-                segLayer = QImage(self.segs)
+                segLayer = QImage(self.origSeg)
                 segLayer.save(self.buffer, "PNG")
                 strio = cStringIO.StringIO()
                 strio.write(self.buffer.data())
                 self.buffer.close()
                 strio.seek(0)
+
+                #Crop img for GMM segmentation
                 mask = Image.open(strio)
                 maskCrop = mask.crop(crop_rectangle)
                 maskCrop = maskCrop.convert('RGB')
@@ -330,10 +409,13 @@ class Window(QtGui.QMainWindow):
                 self.segs = QtGui.QPixmap.fromImage(layer)
                 self.segment.setPixmap(QtGui.QPixmap(self.segs))
                 self.segment.update()
+            self.maskStack.append(QImage(self.segs))
+            self.origStack.append(QImage(self.origSeg))
 
     #Method used by GMM tool to update the segmentation mask with GMM tool output
     def updateMask(self, crop, xmin, xmax, ymin, ymax):
-        newSegLayer = QImage(self.segs)
+        #Use buffer to convert QImage to PIL Image
+        newSegLayer = QImage(self.origSeg)
         newSegLayer.save(self.buffer, "PNG")
         strio = cStringIO.StringIO()
         strio.write(self.buffer.data())
@@ -342,29 +424,55 @@ class Window(QtGui.QMainWindow):
         maskLayer = Image.open(strio)
         maskLayerRGB = maskLayer.convert('RGB')
         maskLayerRGB = np.array(maskLayerRGB)
+
+        #Add GMM result to current mask
         crop = np.array(crop)
         for y in range(ymin, ymax):
             for x in range(xmin, xmax):
                 maskLayerRGB[y,x] = crop[y - ymin, x - xmin]
+
+        #Update Pixmap with updated mask
         newMask = Image.fromarray(maskLayerRGB)
+        layer = ImageQt(newMask)
+        self.origSeg = QtGui.QPixmap.fromImage(layer)
         newMask = defAlpha(newMask, 100, 1)
         layer = ImageQt(newMask)
         self.segs = QtGui.QPixmap.fromImage(layer)
         self.segment.setPixmap(QtGui.QPixmap(self.segs))
         self.segment.update()
 
-    #Method for undoing the last action TODO: Complete Function
+    #Method for undoing the last action
     def undoAction(self):
-        self.lastMask
+        print(len(self.maskStack))
+
+        if(len(self.maskStack) == 0):
+            self.segs = QImage(ImageQt("LastSeg.png"))
+            self.origSeg = QImage(ImageQt("LastSegO.png"))
+            self.origStack.append(self.origStackStart)
+        else :
+            self.segs = self.maskStack.pop()
+            self.origSeg = self.origStack.pop()
+        self.segment.setPixmap(QtGui.QPixmap(self.segs))
+        self.segment.update()
 
     #Method for drawing a line between 2 points
     def drawLineTo(self, endPoint):
-        endPoint.setY(endPoint.y() - 60)
+        endPoint.setY(endPoint.y() - 60) #Convert Y Co-ord to Mask Local Co-ords
+
+        #Paint Line onto mask Pixmap
         painter = QtGui.QPainter(self.segs)
         painter.setPen(QtGui.QPen(self.myPenColor, self.myPenWidth,
             QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
         painter.drawLine(self.lastPoint, endPoint)
         painter.end()
+        modified = True
+        painter = QtGui.QPainter(self.origSeg)
+        painter.setPen(QtGui.QPen(self.myPenColor, self.myPenWidth,
+            QtCore.Qt.SolidLine, QtCore.Qt.RoundCap, QtCore.Qt.RoundJoin))
+        painter.drawLine(self.lastPoint, endPoint)
+        painter.end()
+
+        #Update Pixmap
         modified = True
         self.segment.setPixmap(QtGui.QPixmap(self.segs))
         self.segment.update()
